@@ -1,0 +1,60 @@
+
+name: Discord Periodic Alarm
+
+on:
+  schedule:
+    - cron: "3-59/5 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: discord-periodic-alarm
+  cancel-in-progress: false
+
+jobs:
+  alarm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check schedule and notify
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import json
+          import urllib.request
+          from datetime import datetime, timezone
+
+          start = datetime(2026, 10, 30, 17, 33,
+                           tzinfo=timezone.utc)
+          interval = 36 * 3600 + 15 * 60
+          now = datetime.now(timezone.utc)
+
+          elapsed = (now - start).total_seconds()
+          if elapsed < 0:
+              exit(0)
+
+          cycle, remainder = divmod(elapsed, interval)
+
+          # Only send within 5 minutes of a due time
+          if remainder >= 300:
+              exit(0)
+
+          if not os.environ.get("WEBHOOK_URL"):
+              raise RuntimeError("Missing Discord webhook URL")
+
+          payload = {
+              "content": "🐬10분 후 어비스 검은 구멍 출현🐬"
+          }
+
+          request = urllib.request.Request(
+              os.environ["WEBHOOK_URL"],
+              data=json.dumps(payload).encode("utf-8"),
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+
+          with urllib.request.urlopen(request, timeout=20) as r:
+              print("Notification sent:", r.status)
+          PY
