@@ -1,9 +1,8 @@
-
 name: Discord Periodic Alarm
 
 on:
   schedule:
-    - cron: "3-59/5 * * * *"
+    - cron: "7,37 * * * *"
   workflow_dispatch:
 
 permissions: {}
@@ -15,46 +14,46 @@ concurrency:
 jobs:
   alarm:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
-      - name: Check schedule and notify
+      - name: Wait and notify
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           python3 - <<'PY'
-          import os
-          import json
-          import urllib.request
-          from datetime import datetime, timezone
+          import os, json, time, urllib.request
+          from datetime import datetime, timezone, timedelta
 
-          start = datetime(2026, 10, 30, 17, 33,
-                           tzinfo=timezone.utc)
-          interval = 36 * 3600 + 15 * 60
+          start = datetime(2026, 10, 30, 17, 33, tzinfo=timezone.utc)
+          interval = timedelta(hours=36, minutes=15)
+          lookahead = timedelta(minutes=90)
+
           now = datetime.now(timezone.utc)
+          if now < start:
+              next_due = start
+          else:
+              next_due = start + ((now - start) // interval + 1) * interval
 
-          elapsed = (now - start).total_seconds()
-          if elapsed < 0:
-              exit(0)
+          wait = next_due - now
+          if wait > lookahead:
+              print(f"Next due {next_due}, {wait} away. Skip.")
+              raise SystemExit
 
-          cycle, remainder = divmod(elapsed, interval)
+          print(f"Sleeping {wait} until {next_due}")
+          time.sleep(wait.total_seconds())
 
-          # Only send within 5 minutes of a due time
-          if remainder >= 300:
-              exit(0)
-
-          if not os.environ.get("WEBHOOK_URL"):
+          url = os.environ.get("WEBHOOK_URL")
+          if not url:
               raise RuntimeError("Missing Discord webhook URL")
 
-          payload = {
-              "content": "🐬10분 후 어비스 검은 구멍 출현🐬"
-          }
-
-          request = urllib.request.Request(
-              os.environ["WEBHOOK_URL"],
+          ts = int((next_due + timedelta(minutes=10)).timestamp())
+          payload = {"content": f"🐬 <t:{ts}:t> 어비스 검은 구멍 출현 (<t:{ts}:R>) 🐬"}
+          req = urllib.request.Request(
+              url,
               data=json.dumps(payload).encode("utf-8"),
-              headers={"Content-Type": "application/json"},
-              method="POST"
-          )
-
-          with urllib.request.urlopen(request, timeout=20) as r:
+              headers={"Content-Type": "application/json",
+                       "User-Agent": "DiscordBot (github-actions, 1.0)"},
+              method="POST")
+          with urllib.request.urlopen(req, timeout=20) as r:
               print("Notification sent:", r.status)
           PY
