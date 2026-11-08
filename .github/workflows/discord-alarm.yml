@@ -1,59 +1,131 @@
 name: Discord Periodic Alarm
 
+# 어비스 검은 구멍 출현 10분 전에 디스코드로 알린다.
+# 기준 시각은 이 저장소의 hole.json을 읽는다. MBNG Advisor 상단 [변경]에서 토큰을 넣고 저장하면 이 파일이 바뀐다.
+# - 예약 실행(30분마다): 90분 안에 알릴 회차가 있으면 그때까지 기다렸다 보낸다. 기다리는 동안 5분마다 hole.json을 다시 읽는다.
+# - hole.json이 바뀌면(push): 바로 갱신 확인 메시지를 보낸다.
+# - 목요일 06:00(한국 시간) 정기점검 뒤에는 새 기준이 들어올 때까지 알리지 않는다.
+
 on:
   schedule:
     - cron: "7,37 * * * *"
+  push:
+    paths:
+      - hole.json
   workflow_dispatch:
 
-permissions: {}
-
-concurrency:
-  group: discord-periodic-alarm
-  cancel-in-progress: false
+permissions:
+  contents: read
 
 jobs:
   alarm:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    concurrency:
+      group: discord-hole-${{ github.event_name == 'push' && 'notice' || 'alarm' }}
+      cancel-in-progress: false
     steps:
-      - name: Wait and notify
+      - name: Notify
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MODE: ${{ github.event_name == 'push' && 'notice' || 'alarm' }}
         run: |
           python3 - <<'PY'
-          import os, json, time, urllib.request
+          import os, json, time, urllib.request, urllib.error
           from datetime import datetime, timezone, timedelta
 
-          start = datetime(2026, 10, 30, 17, 33, tzinfo=timezone.utc)
-          interval = timedelta(hours=36, minutes=15)
-          lookahead = timedelta(minutes=90)
+          KST = timezone(timedelta(hours=9))
+          CYCLE = timedelta(hours=36, minutes=15)   # 15분 열림 + 36시간
+          LEAD = timedelta(minutes=10)              # 출현 10분 전에 알림
+          LOOK = timedelta(minutes=90)
+          POLL = 300
 
-          now = datetime.now(timezone.utc)
-          if now < start:
-              next_due = start
-          else:
-              next_due = start + ((now - start) // interval + 1) * interval
+          def utcnow():
+              return datetime.now(timezone.utc)
 
-          wait = next_due - now
-          if wait > lookahead:
-              print(f"Next due {next_due}, {wait} away. Skip.")
-              raise SystemExit
+          def done(msg=""):
+              """건너뛰는 경우도 성공(종료 코드 0)으로 끝낸다. SystemExit에 문자열을 주면 실패로 표시된다"""
+              if msg:
+                  print(msg)
+              raise SystemExit(0)
 
-          print(f"Sleeping {wait} until {next_due}")
-          time.sleep(wait.total_seconds())
+          def load_base():
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{os.environ['REPO']}/contents/hole.json",
+                  headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                           "Accept": "application/vnd.github.raw+json",
+                           "X-GitHub-Api-Version": "2022-11-28",
+                           "User-Agent": "mbng-hole-alarm"})
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as r:
+                      return datetime.fromisoformat(json.load(r)["base"])
+              except urllib.error.HTTPError as e:
+                  if e.code == 404:
+                      return None
+                  raise
 
-          url = os.environ.get("WEBHOOK_URL")
-          if not url:
-              raise RuntimeError("Missing Discord webhook URL")
+          def reset_after(t):
+              """t 다음 목요일 06:00(KST) 정기점검"""
+              d = t.astimezone(KST)
+              n = datetime(d.year, d.month, d.day, 6, tzinfo=KST) + timedelta(days=(3 - d.weekday()) % 7)
+              return n if n > t else n + timedelta(days=7)
 
-          ts = int((next_due + timedelta(minutes=10)).timestamp())
-          payload = {"content": f"🐬 <t:{ts}:t> 어비스 검은 구멍 출현 (<t:{ts}:R>) 🐬"}
-          req = urllib.request.Request(
-              url,
-              data=json.dumps(payload).encode("utf-8"),
-              headers={"Content-Type": "application/json",
-                       "User-Agent": "DiscordBot (github-actions, 1.0)"},
-              method="POST")
-          with urllib.request.urlopen(req, timeout=20) as r:
-              print("Notification sent:", r.status)
+          def holes(base, after):
+              """after 이후에 출현하는 회차, 다음 점검 전까지"""
+              end = reset_after(base)
+              k = max(0, -((base - after) // CYCLE))
+              h = base + k * CYCLE
+              while h < end:
+                  yield h
+                  h += CYCLE
+
+          def post(content):
+              url = os.environ.get("WEBHOOK_URL")
+              if not url:
+                  raise RuntimeError("Missing Discord webhook URL")
+              req = urllib.request.Request(
+                  url, data=json.dumps({"content": content}).encode("utf-8"),
+                  headers={"Content-Type": "application/json",
+                           "User-Agent": "DiscordBot (github-actions, 1.0)"},
+                  method="POST")
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  print("Notification sent:", r.status)
+
+          ts = lambda t: int(t.timestamp())
+          base = load_base()
+          if base is None:
+              done("hole.json이 없어 건너뜀")
+
+          if os.environ["MODE"] == "notice":
+              L = list(holes(base, utcnow()))[:3]
+              if L:
+                  nxt = " · ".join(f"<t:{ts(h)}:f>" for h in L)
+                  post(f"🐬 어비스 검은 구멍 시각 갱신 · 다음 출현 {nxt} (<t:{ts(L[0])}:R>) 🐬")
+              else:
+                  post(f"🐬 어비스 검은 구멍 기준이 갱신됐지만 다음 점검(<t:{ts(reset_after(base))}:f>) 전까지 남은 출현이 없어요 🐬")
+              done()
+
+          h = next(holes(base, utcnow() + LEAD), None)
+          if h is None:
+              done(f"기준 {base}: 점검 전 남은 회차 없음, 새 기준을 기다림")
+          if h - LEAD - utcnow() > LOOK:
+              done(f"다음 알림 {h - LEAD}, 아직 멀어서 건너뜀")
+
+          while True:
+              wait = (h - LEAD - utcnow()).total_seconds()
+              if wait <= 0:
+                  break
+              print(f"{h - LEAD}까지 대기 ({int(wait)}초)")
+              time.sleep(min(wait, POLL))
+              nb = load_base()
+              if nb != base:
+                  base = nb
+                  h = None if base is None else next(holes(base, utcnow() + LEAD), None)
+                  if h is None or h - LEAD - utcnow() > LOOK:
+                      done("기준이 바뀌어 이번 대기를 끝냄")
+                  print(f"기준이 바뀜: 다음 출현 {h}")
+
+          post(f"🐬 <t:{ts(h)}:t> 어비스 검은 구멍 출현 (<t:{ts(h)}:R>) 🐬")
           PY
