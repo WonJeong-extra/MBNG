@@ -2,7 +2,8 @@ name: Discord Periodic Alarm
 
 # 어비스 검은 구멍 출현 10분 전에 디스코드로 알린다.
 # 기준 시각은 이 저장소의 hole.json을 읽는다. MBNG Advisor 상단 [변경]에서 토큰을 넣고 저장하면 이 파일이 바뀐다.
-# - 예약 실행(30분마다): 90분 안에 알릴 회차가 있으면 그때까지 기다렸다 보낸다. 기다리는 동안 5분마다 hole.json을 다시 읽는다.
+# - 예약 실행: 150분 안에 알릴 회차가 있으면 그때까지 기다렸다 보낸다. 기다리는 동안 5분마다 hole.json을 다시 읽는다.
+#   cron은 30분마다로 적었지만 GitHub이 실제로는 약 1시간 간격(최대 108분, 2026-11-07~09 기록)으로 돌려서 대기 범위를 넉넉히 잡는다.
 # - hole.json이 바뀌면(push): 바로 갱신 확인 메시지를 보낸다.
 # - 목요일 06:00(한국 시간) 정기점검 뒤에는 새 기준이 들어올 때까지 알리지 않는다.
 
@@ -20,7 +21,7 @@ permissions:
 jobs:
   alarm:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     concurrency:
       group: discord-hole-${{ github.event_name == 'push' && 'notice' || 'alarm' }}
       cancel-in-progress: false
@@ -39,7 +40,7 @@ jobs:
           KST = timezone(timedelta(hours=9))
           CYCLE = timedelta(hours=36, minutes=15)   # 15분 열림 + 36시간
           LEAD = timedelta(minutes=10)              # 출현 10분 전에 알림
-          LOOK = timedelta(minutes=90)
+          LOOK = timedelta(minutes=150)
           POLL = 300
 
           def utcnow():
