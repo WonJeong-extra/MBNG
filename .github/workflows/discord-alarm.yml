@@ -5,7 +5,10 @@ name: Discord Periodic Alarm
 # - 예약 실행: 150분 안에 알릴 회차가 있으면 그때까지 기다렸다 보낸다. 기다리는 동안 5분마다 hole.json을 다시 읽는다.
 #   cron은 30분마다로 적었지만 GitHub이 실제로는 약 1시간 간격(최대 108분, 2026-11-07~09 기록)으로 돌려서 대기 범위를 넉넉히 잡는다.
 # - hole.json이 바뀌면(push): 바로 갱신 확인 메시지를 보낸다.
-# - 목요일 06:00(한국 시간) 정기점검 뒤에는 새 기준이 들어올 때까지 알리지 않는다.
+# - 점검 뒤에는 새 기준이 들어올 때까지 알리지 않는다. 점검 시각은 MBNG Advisor 데이터 API의 점검 일정
+#   (api/v1/maintenance.json, 공식 공지사항에서 자동으로 옮김)을 앱과 같은 규칙으로 쓴다.
+#   공지된 점검(정기·임시)과 공지 없는 목요일 06:00 중 이른 쪽이고, '정기점검 미진행' 공지가 있는 목요일은 건너뛴다.
+#   일정을 못 읽으면 목요일 06:00만 쓴다(로그에 남김).
 
 on:
   schedule:
@@ -67,11 +70,46 @@ jobs:
                       return None
                   raise
 
-          def reset_after(t):
-              """t 다음 목요일 06:00(KST) 정기점검"""
+          MAINT_URL = "https://wonjeong-dev.github.io/MBNG-Advisor/api/v1/maintenance.json"
+
+          def load_maint():
+              """공지된 점검 시작 시각 목록과 미진행 날짜. 못 읽으면 None"""
+              try:
+                  req = urllib.request.Request(MAINT_URL, headers={"User-Agent": "mbng-hole-alarm"})
+                  with urllib.request.urlopen(req, timeout=20) as r:
+                      rows = json.load(r)["data"]["schedule"]
+                  starts = sorted(datetime.fromisoformat(m["start_at"]) for m in rows
+                                  if not m["canceled"] and m["start_at"])
+                  skip = {m["date"] for m in rows if m["canceled"]}
+                  return starts, skip
+              except Exception as e:
+                  print("점검 일정을 못 읽어 목요일 06:00만 씀:", e)
+                  return None
+
+          MAINT = load_maint()
+
+          def thursday_after(t):
+              """t 다음 목요일 06:00(KST)"""
               d = t.astimezone(KST)
               n = datetime(d.year, d.month, d.day, 6, tzinfo=KST) + timedelta(days=(3 - d.weekday()) % 7)
               return n if n > t else n + timedelta(days=7)
+
+          def reset_after(t):
+              """t 다음 점검 시작(앱 holeReset과 같은 규칙)"""
+              n = thursday_after(t)
+              if MAINT is None:
+                  return n
+              starts, skip = MAINT
+              days = {s.astimezone(KST).date().isoformat() for s in starts}
+              for _ in range(8):
+                  day = n.astimezone(KST).date().isoformat()
+                  if day not in skip and day not in days:
+                      break
+                  n += timedelta(days=7)
+              for s in starts:
+                  if t < s < n:
+                      n = s
+              return n
 
           def holes(base, after):
               """after 이후에 출현하는 회차, 다음 점검 전까지"""
@@ -121,12 +159,13 @@ jobs:
               print(f"{h - LEAD}까지 대기 ({int(wait)}초)")
               time.sleep(min(wait, POLL))
               nb = load_base()
-              if nb != base:
-                  base = nb
+              nm = load_maint() or MAINT   # 대기 중 임시점검이 공지되면 반영, 못 읽으면 전 값 유지
+              if nb != base or nm != MAINT:
+                  base, MAINT = nb, nm
                   h = None if base is None else next(holes(base, utcnow() + LEAD), None)
                   if h is None or h - LEAD - utcnow() > LOOK:
-                      done("기준이 바뀌어 이번 대기를 끝냄")
-                  print(f"기준이 바뀜: 다음 출현 {h}")
+                      done("기준 또는 점검 일정이 바뀌어 이번 대기를 끝냄")
+                  print(f"기준 또는 점검 일정이 바뀜: 다음 출현 {h}")
 
           post(f"🐬 <t:{ts(h)}:t> 어비스 검은 구멍 출현 (<t:{ts(h)}:R>) 🐬")
           PY
